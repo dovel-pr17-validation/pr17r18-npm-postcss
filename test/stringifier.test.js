@@ -1,0 +1,596 @@
+let { test } = require('uvu')
+let { equal, is } = require('uvu/assert')
+
+let {
+  AtRule,
+  Comment,
+  Declaration,
+  Document,
+  Node,
+  parse,
+  Root,
+  Rule
+} = require('../lib/postcss')
+let Stringifier = require('../lib/stringifier')
+let defaultStringify = require('../lib/stringify')
+
+let str
+
+test.before.each(() => {
+  str = new Stringifier()
+})
+
+test('creates trimmed/raw property', () => {
+  let b = new Node({ one: 'trim' })
+  b.raws.one = { raw: 'raw', value: 'trim' }
+  is(str.rawValue(b, 'one'), 'raw')
+
+  b.one = 'trim1'
+  is(str.rawValue(b, 'one'), 'trim1')
+})
+
+test('works without rawValue magic', () => {
+  let b = new Node()
+  b.one = '1'
+  is(b.one, '1')
+  is(str.rawValue(b, 'one'), '1')
+})
+
+test('uses node raw', () => {
+  let rule = new Rule({ raws: { between: '\n' }, selector: 'a' })
+  is(str.raw(rule, 'between', 'beforeOpen'), '\n')
+})
+
+test('hacks before for nodes without parent', () => {
+  let rule = new Rule({ selector: 'a' })
+  is(str.raw(rule, 'before'), '')
+})
+
+test('hacks before for first node', () => {
+  let root = new Root()
+  root.append(new Rule({ selector: 'a' }))
+  is(str.raw(root.first, 'before'), '')
+})
+
+test('hacks before for first decl', () => {
+  let decl = new Declaration({ prop: 'color', value: 'black' })
+  is(str.raw(decl, 'before'), '')
+
+  let rule = new Rule({ selector: 'a' })
+  rule.append(decl)
+  is(str.raw(decl, 'before'), '\n    ')
+})
+
+test('detects after raw', () => {
+  let root = new Root()
+  root.append({ raws: { after: ' ' }, selector: 'a' })
+  root.first.append({ prop: 'color', value: 'black' })
+  root.append({ selector: 'a' })
+  is(str.raw(root.last, 'after'), ' ')
+})
+
+test('uses defaults without parent', () => {
+  let rule = new Rule({ selector: 'a' })
+  is(str.raw(rule, 'between', 'beforeOpen'), ' ')
+})
+
+test('uses defaults for unique node', () => {
+  let root = new Root()
+  root.append(new Rule({ selector: 'a' }))
+  is(str.raw(root.first, 'between', 'beforeOpen'), ' ')
+})
+
+test('clones raw from first node', () => {
+  let root = new Root()
+  root.append(new Rule({ raws: { between: '' }, selector: 'a' }))
+  root.append(new Rule({ selector: 'b' }))
+
+  is(str.raw(root.last, 'between', 'beforeOpen'), '')
+})
+
+test('indents by default', () => {
+  let root = new Root()
+  root.append(new AtRule({ name: 'page' }))
+  root.first.append(new Rule({ selector: 'a' }))
+  root.first.first.append({ prop: 'color', value: 'black' })
+
+  is(
+    root.toString(),
+    '@page {\n' + '    a {\n' + '        color: black\n' + '    }\n' + '}'
+  )
+})
+
+test('clones style', () => {
+  let compress = parse('@page{ a{ } }')
+  let spaces = parse('@page {\n  a {\n  }\n}')
+
+  compress.first.first.append({ prop: 'color', value: 'black' })
+  is(compress.toString(), '@page{ a{ color: black } }')
+
+  spaces.first.first.append({ prop: 'color', value: 'black' })
+  is(spaces.toString(), '@page {\n  a {\n    color: black\n  }\n}')
+})
+
+test('clones indent', () => {
+  let root = parse('a{\n}')
+  root.first.append({ text: 'a' })
+  root.first.append({ raws: { before: '\n\n ' }, text: 'b' })
+  is(root.toString(), 'a{\n\n /* a */\n\n /* b */\n}')
+})
+
+test('clones declaration before for comment', () => {
+  let root = parse('a{\n}')
+  root.first.append({ text: 'a' })
+  root.first.append({
+    prop: 'a',
+    raws: { before: '\n\n ' },
+    value: '1'
+  })
+  is(root.toString(), 'a{\n\n /* a */\n\n a: 1\n}')
+})
+
+test('clones indent by types', () => {
+  let css = parse('a {\n  *color: black\n}\n\nb {\n}')
+  css.append(new Rule({ selector: 'em' }))
+  css.last.append({ prop: 'z-index', value: '1' })
+  is(css.last.first.raw('before'), '\n  ')
+})
+
+test('ignores non-space symbols in indent cloning', () => {
+  let css = parse('a {\n  color: black\n}\n\nb {\n}')
+  css.append(new Rule({ selector: 'em' }))
+  css.last.append({ prop: 'z-index', value: '1' })
+
+  is(css.last.raw('before'), '\n\n')
+  is(css.last.first.raw('before'), '\n  ')
+})
+
+test('clones indent by before and after', () => {
+  let css = parse('@page{\n\n a{\n  color: black}}')
+  css.first.append(new Rule({ selector: 'b' }))
+  css.first.last.append({ prop: 'z-index', value: '1' })
+
+  is(css.first.last.raw('before'), '\n\n ')
+  is(css.first.last.raw('after'), '')
+})
+
+test('clones semicolon only from rules with children', () => {
+  let css = parse('a{}b{one:1;}')
+  is(str.raw(css.first, 'semicolon'), true)
+})
+
+test('terminates childless at-rule followed by a comment', () => {
+  let css = parse('a {}\n/* comment */')
+  css.insertBefore(css.last, new AtRule({ name: 'import', params: '"x.css"' }))
+
+  is(css.toString(), 'a {}\n@import "x.css";\n/* comment */')
+  is(
+    parse(css.toString())
+      .nodes.map(i => i.type)
+      .join(','),
+    'rule,atrule,comment'
+  )
+})
+
+test('terminates nested childless at-rule followed by a comment', () => {
+  let css = parse('@media screen {\n  a {}\n}')
+  css.first.append(new AtRule({ name: 'import', params: '"y.css"' }))
+  css.first.append(new Comment({ text: 'note' }))
+
+  is(
+    css.toString(),
+    '@media screen {\n  a {}\n  @import "y.css";\n  /* note */\n}'
+  )
+  is(
+    parse(css.toString())
+      .first.nodes.map(i => i.type)
+      .join(','),
+    'rule,atrule,comment'
+  )
+})
+
+test('terminates custom property followed by a comment', () => {
+  let css = parse('a{--x:red}')
+  css.first.append(new Comment({ text: 'note' }))
+
+  is(css.toString(), 'a{--x:red;/* note */}')
+  is(
+    parse(css.toString())
+      .first.nodes.map(i => i.type)
+      .join(','),
+    'decl,comment'
+  )
+})
+
+test('terminates custom property with !important before a comment', () => {
+  let css = parse('a{--x:red !important}')
+  css.first.first.after(new Comment({ text: 'note' }))
+
+  is(css.toString(), 'a{--x:red !important;/* note */}')
+  is(
+    parse(css.toString())
+      .first.nodes.map(i => i.type)
+      .join(','),
+    'decl,comment'
+  )
+})
+
+test('keeps hack-prefixed property before a comment unchanged', () => {
+  for (let css of ['a{*--x:red/*c*/}', 'a{_--x:red/*c*/}']) {
+    let root = parse(css)
+    is(root.toString(), css)
+    is(
+      parse(root.toString())
+        .first.nodes.map(i => i.type)
+        .join(','),
+      'decl,comment'
+    )
+  }
+})
+
+test('terminates indented custom property followed by a comment', () => {
+  let css = parse('a{  --x:red}')
+  css.first.first.after(new Comment({ text: 'note' }))
+
+  is(css.toString(), 'a{  --x:red;  /* note */}')
+  is(
+    parse(css.toString())
+      .first.nodes.map(i => i.type)
+      .join(','),
+    'decl,comment'
+  )
+})
+
+test('terminates custom property after a free semicolon', () => {
+  let css = parse('a{color:red;;--x:blue}')
+  css.first.append(new Comment({ text: 'note' }))
+
+  is(css.toString(), 'a{color:red;;--x:blue;/* note */}')
+  is(
+    parse(css.toString())
+      .first.nodes.map(i => i.type)
+      .join(','),
+    'decl,decl,comment'
+  )
+})
+
+test('clones only spaces in before', () => {
+  let css = parse('a{*one:1}')
+  css.first.append({ prop: 'two', value: '2' })
+  css.append({ name: 'keyframes', params: 'a' })
+  css.last.append({ selector: 'from' })
+  is(css.toString(), 'a{*one:1;two:2}\n@keyframes a{\nfrom{}}')
+})
+
+test('clones only spaces in between', () => {
+  let css = parse('a{one/**/:1}')
+  css.first.append({ prop: 'two', value: '2' })
+  is(css.toString(), 'a{one/**/:1;two:2}')
+})
+
+test('uses optional raws.indent', () => {
+  let rule = new Rule({ raws: { indent: ' ' }, selector: 'a' })
+  rule.append({ prop: 'color', value: 'black' })
+  is(rule.toString(), 'a {\n color: black\n}')
+})
+
+test('handles nested roots', () => {
+  let root = new Root()
+  let subRoot = new Root()
+  subRoot.append(new AtRule({ name: 'foo' }))
+  root.append(subRoot)
+
+  is(root.toString(), '@foo')
+})
+
+test('handles root', () => {
+  let root = new Root()
+  root.append(new AtRule({ name: 'foo' }))
+
+  let s = root.toString()
+
+  is(s, '@foo')
+})
+
+test('handles root with after', () => {
+  let root = new Root({ raws: { after: '   ' } })
+  root.append(new AtRule({ name: 'foo' }))
+
+  let s = root.toString()
+
+  is(s, '@foo   ')
+})
+
+test('pass nodes to document', () => {
+  let root = new Root()
+  let document = new Document({ nodes: [root] })
+
+  is(document.toString(), '')
+})
+
+test('handles document with one root', () => {
+  let root = new Root()
+  root.append(new AtRule({ name: 'foo' }))
+
+  let document = new Document()
+  document.append(root)
+
+  let s = document.toString()
+
+  is(s, '@foo')
+})
+
+test('handles document with one root and after raw', () => {
+  let document = new Document()
+  let root = new Root({ raws: { after: '   ' } })
+  root.append(new AtRule({ name: 'foo' }))
+  document.append(root)
+
+  let s = document.toString()
+
+  is(s, '@foo   ')
+})
+
+test('handles document with one root and before and after', () => {
+  let document = new Document()
+  let root = new Root({ raws: { after: 'AFTER' } })
+  root.append(new AtRule({ name: 'foo' }))
+  document.append(root)
+
+  let s = document.toString()
+
+  is(s, '@fooAFTER')
+})
+
+test('handles document with three roots without raws', () => {
+  let root1 = new Root()
+  root1.append(new AtRule({ name: 'foo' }))
+
+  let root2 = new Root()
+  root2.append(new Rule({ selector: 'a' }))
+
+  let root3 = new Root()
+  root3.append(new Declaration({ prop: 'color', value: 'black' }))
+
+  let document = new Document()
+  document.append(root1)
+  document.append(root2)
+  document.append(root3)
+
+  let s = document.toString()
+
+  is(s, '@fooa {}color: black')
+})
+
+test('handles document with three roots, with before and after raws', () => {
+  let root1 = new Root({ raws: { after: 'AFTER_ONE' } })
+  root1.append(new Rule({ selector: 'a.one' }))
+
+  let root2 = new Root({ raws: { after: 'AFTER_TWO' } })
+  root2.append(new Rule({ selector: 'a.two' }))
+
+  let root3 = new Root({ raws: { after: 'AFTER_THREE' } })
+  root3.append(new Rule({ selector: 'a.three' }))
+
+  let document = new Document()
+  document.append(root1)
+  document.append(root2)
+  document.append(root3)
+
+  let s = document.toString()
+
+  is(s, 'a.one {}AFTER_ONEa.two {}AFTER_TWOa.three {}AFTER_THREE')
+})
+
+test('escapes </style & <!-- with \\3c CSS escape', () => {
+  let root = new Root()
+  root.append(new Rule({ selector: '</style>' }))
+  root.append(new AtRule({ name: 'media', params: '<style>' }))
+  root.append({ text: '</style><!--<style>' })
+  let rule = new Rule({ selector: 'a' })
+  rule.raws.before = '\n</style>'
+  rule.raws.after = '</style>'
+  rule.append(new Declaration({ prop: 'color', value: '</style>' }))
+  root.append(rule)
+
+  is(
+    root.toString(),
+    '\\3c /style> {}\n' +
+      '@media \\3c style>;\n' +
+      '/* \\3c /style>\\3c !--\\3c style> */\n' +
+      '\\3c /style>a {\n' +
+      '    color: \\3c /style>' +
+      '\\3c /style>}'
+  )
+})
+
+test('escapes </style split between nodes and raws', () => {
+  let payload = ':@x</style><script>alert(1)</script>'
+  is(parse(payload).toString(), ':@x\\3c /style><script>alert(1)</script>')
+  is(
+    parse('.user{color:red;' + payload + '}').toString(),
+    '.user{color:red;:@x\\3c /style><script>alert(1)</script>}'
+  )
+
+  let root = parse('a{}')
+  root.first.raws.before = '</'
+  root.first.selector = 'STYLE><script>alert(1)</script>'
+  is(root.toString(), '\\3c /STYLE><script>alert(1)</script>{}')
+
+  root = new Root()
+  root.append(new Declaration({ prop: 'le>', value: 'a' }))
+  root.first.raws.before = '</sty'
+  root.append(new Declaration({ prop: '-', value: 'b' }))
+  root.last.raws.before = '<!-'
+  is(root.toString(), '\\3c /style>: a;\\3c !--: b')
+})
+
+test('keeps < which does not need escaping', () => {
+  let css = 'a<{b:c<}\n@x<;'
+  is(parse(css).toString(), css)
+})
+
+test('escapes only output of the default stringifier', () => {
+  let root = parse(':@x</style>')
+  is(root.first.toString(), '/style>')
+
+  let chunks = []
+  new Stringifier(chunk => chunks.push(chunk)).stringify(root)
+  equal(chunks, [':@x<', '/style>'])
+
+  let custom = (node, builder) => new Stringifier(builder).stringify(node)
+  is(root.toString(custom), ':@x</style>')
+  is(root.toString({ stringify: custom }), ':@x</style>')
+  is(root.toString({ stringify: defaultStringify }), ':@x\\3c /style>')
+})
+
+test('escapes </style in output of every node type', () => {
+  let root = parse(
+    'a{b:"</style>"}@media </style>{c{}}@x <!--;/* </style> */' +
+      '.user{color:red;:@x</style><script>alert(1)</script>}'
+  )
+  let [rule, media, atrule, comment, user] = root.nodes
+
+  is(rule.toString(), 'a{b:"\\3c /style>"}')
+  is(rule.first.toString(), 'b:"\\3c /style>"')
+  is(media.toString(), '@media \\3c /style>{c{}}')
+  is(atrule.toString(), '@x \\3c !--')
+  is(comment.toString(), '/* \\3c /style> */')
+  is(
+    user.toString(),
+    '.user{color:red;:@x\\3c /style><script>alert(1)</script>}'
+  )
+  is(
+    new Declaration({ prop: 'a', value: '</STYLE>' }).toString(),
+    'a: \\3c /STYLE>'
+  )
+
+  let css = ''
+  defaultStringify(rule, chunk => (css += chunk))
+  is(css, 'a{b:"\\3c /style>"}')
+})
+
+test('calls the builder with every node when escaping', () => {
+  let root = parse('a{}b{color:red}</style>c{}')
+  let chunks = []
+  defaultStringify(root, (chunk, node, type) => {
+    chunks.push([chunk, node && node.type, type])
+  })
+
+  equal(
+    chunks,
+    [
+      ['a{', 'rule', 'start'],
+      ['}', 'rule', 'end'],
+      ['b{', 'rule', 'start'],
+      ['color:red', 'decl', undefined],
+      ['}', 'rule', 'end'],
+      ['\\3c /style>c{', 'rule', 'start'],
+      ['}', 'rule', 'end']
+    ]
+  )
+  is(
+    chunks.map(chunk => chunk[0]).join(''),
+    root.toString()
+  )
+})
+
+test('escapes Roots inside Document but not Document raws', () => {
+  let document = new Document()
+  let root1 = new Root()
+  root1.append(new Rule({ selector: 'a' }))
+  let root2 = new Root({ raws: { after: '</style>' } })
+  root2.raws.before = '</style>'
+  root2.append(new Rule({ selector: '</style>' }))
+  document.append(root1)
+  document.append(root2)
+
+  is(document.toString(), 'a {}</style>\\3c /style> {}</style>')
+})
+
+test('does not insert BOM of Root inside Document', () => {
+  let document = new Document()
+  document.append(parse('\uFEFFa{}'))
+  document.append(parse('\uFEFF<!--{}'))
+  is(document.toString(), 'a{}\\3c !--{}')
+
+  let raw = ''
+  new Stringifier(chunk => (raw += chunk)).stringify(document)
+  is(raw, 'a{}<!--{}')
+})
+
+test('always calls raw to retrieve raws', () => {
+  class CustomStringifier extends Stringifier {
+    raw(node, own, detect) {
+      return `\nRAW(${node.type}, ${own}, ${detect})\n`
+    }
+  }
+  let root = new Root()
+  let rootRule = new Rule({ selector: 'a' })
+  let decl = new Declaration({ prop: 'color', value: 'black' })
+  decl.raws.before = 'BEFORE'
+  decl.raws.between = 'BETWEEN'
+  decl.raws.after = 'AFTER'
+  root.append(rootRule)
+  rootRule.append(decl)
+
+  let stringify = (node, builder) => {
+    let customStringifier = new CustomStringifier(builder)
+    customStringifier.stringify(node)
+  }
+  let result = root.toString(stringify)
+  is(
+    result,
+    [
+      '',
+      'RAW(rule, before, undefined)',
+      'a',
+      'RAW(rule, between, beforeOpen)',
+      '{',
+      'RAW(decl, before, undefined)',
+      'color',
+      'RAW(decl, between, colon)',
+      'black;',
+      'RAW(rule, after, undefined)',
+      '}'
+    ].join('\n')
+  )
+})
+
+test('adds space before params set on an at-rule parsed without them', () => {
+  let root = parse('@layer{a{color:black}}')
+  root.first.params = 'utilities'
+  is(root.toString(), '@layer utilities{a{color:black}}')
+
+  let media = parse('@media;').first
+  media.params = 'print'
+  is(media.toString(), '@media print')
+})
+
+test('keeps params glued to at-rule name when CSS allows it', () => {
+  let root = parse('@media(min-width:0){}')
+  root.first.params = '(min-width:1px)'
+  is(root.toString(), '@media(min-width:1px){}')
+
+  let imported = parse('@import"a.css"').first
+  imported.params = '"b.css"'
+  is(imported.toString(), '@import"b.css"')
+})
+
+test('supports subclasses with overridden traversal methods', () => {
+  class CustomStringifier extends Stringifier {
+    rule(node) {
+      super.rule(node)
+    }
+  }
+
+  let css = 'a{color:black};@media screen{b{}}'
+  let result = ''
+  let custom = new CustomStringifier(i => {
+    result += i
+  })
+  custom.stringify(parse(css))
+  is(result, css)
+})
+
+test.run()

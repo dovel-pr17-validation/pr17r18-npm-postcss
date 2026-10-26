@@ -1,0 +1,7 @@
+coverage/
+test/
+
+docs/
+tsconfig.json
+eslint.config.mjs
+pnpm-workspace.yaml
